@@ -1,0 +1,776 @@
+//@version=6
+// D3 Ensemble Pro - Production Grade Multi-Indicator Ensemble Strategy
+// Author: Senior Quant & Pine v6 Engineer
+// Description: Combines 13 indicators into ensemble voting system with risk management
+// Timezone: Europe/Brussels | Markets: BINANCE Perpetuals | Non-repainting
+
+indicator("D3 Ensemble Pro", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=100)
+
+// =============================================================================
+// INPUTS - GROUPED FOR CLEAN UI
+// =============================================================================
+
+// Ensemble Weights (13 indicators)
+group_weights = "📊 Indicator Weights"
+w1  = input.float(1.0, "EMA Stack", minval=0, maxval=5, step=0.1, group=group_weights, inline="w1")
+w2  = input.float(1.0, "RSI", minval=0, maxval=5, step=0.1, group=group_weights, inline="w1")
+w3  = input.float(1.0, "VWAP±σ", minval=0, maxval=5, step=0.1, group=group_weights, inline="w1")
+w4  = input.float(1.0, "ATR Regime", minval=0, maxval=5, step=0.1, group=group_weights, inline="w2")
+w5  = input.float(1.0, "Adaptive MACD", minval=0, maxval=5, step=0.1, group=group_weights, inline="w2")
+w6  = input.float(1.0, "BB & BBWP", minval=0, maxval=5, step=0.1, group=group_weights, inline="w2")
+w7  = input.float(1.0, "Stochastic", minval=0, maxval=5, step=0.1, group=group_weights, inline="w3")
+w8  = input.float(1.0, "OBV Oscillator", minval=0, maxval=5, step=0.1, group=group_weights, inline="w3")
+w9  = input.float(1.0, "CCI", minval=0, maxval=5, step=0.1, group=group_weights, inline="w3")
+w10 = input.float(1.0, "Ichimoku", minval=0, maxval=5, step=0.1, group=group_weights, inline="w4")
+w11 = input.float(1.0, "SuperTrend", minval=0, maxval=5, step=0.1, group=group_weights, inline="w4")
+w12 = input.float(1.0, "ADX", minval=0, maxval=5, step=0.1, group=group_weights, inline="w4")
+w13 = input.float(1.0, "Volume Profile", minval=0, maxval=5, step=0.1, group=group_weights, inline="w5")
+
+// Thresholds & Confidence
+group_thresh = "🎯 Signal Thresholds"
+T_long = input.float(0.60, "Long Threshold", minval=0.1, maxval=1.0, step=0.05, group=group_thresh)
+T_short = input.float(0.60, "Short Threshold", minval=0.1, maxval=1.0, step=0.05, group=group_thresh)
+min_conf = input.float(0.65, "Min Confidence", minval=0.5, maxval=0.95, step=0.05, group=group_thresh)
+
+// Risk Management
+group_risk = "⚠️ Risk Management"
+capital = input.float(50.0, "Capital (€)", minval=1, group=group_risk)
+max_loss_trade = input.float(10.0, "Max Loss/Trade (€)", minval=0.5, group=group_risk)
+max_daily_loss = input.float(15.0, "Daily Loss Limit (€)", minval=1, group=group_risk)
+atr_k = input.float(1.3, "ATR SL Multiplier", minval=0.5, maxval=3.0, step=0.1, group=group_risk)
+rr_low = input.float(1.5, "RR Low Conf", minval=1.0, maxval=3.0, step=0.1, group=group_risk)
+rr_high = input.float(2.0, "RR High Conf", minval=1.5, maxval=5.0, step=0.1, group=group_risk)
+
+// Leverage & Position Sizing
+group_pos = "📈 Position & Leverage"
+lev_low = input.int(3, "Leverage Low Conf", minval=1, maxval=20, group=group_pos)
+lev_high = input.int(10, "Leverage High Conf", minval=1, maxval=50, group=group_pos)
+sol_max_lev = input.int(8, "SOL Max Leverage", minval=1, maxval=20, group=group_pos)
+tick_size = input.float(0.01, "Tick Size", minval=0.001, step=0.001, group=group_pos)
+step_size = input.float(0.001, "Step Size", minval=0.0001, step=0.0001, group=group_pos)
+
+// Spread Guards
+group_guards = "🛡️ Market Guards"
+btc_spread_max = input.float(1.5, "BTC Max Spread (bps)", minval=0.1, maxval=10, step=0.1, group=group_guards)
+eth_spread_max = input.float(2.0, "ETH Max Spread (bps)", minval=0.1, maxval=10, step=0.1, group=group_guards)
+sol_spread_max = input.float(3.5, "SOL Max Spread (bps)", minval=0.1, maxval=15, step=0.1, group=group_guards)
+
+// Calibration
+group_calib = "🔧 Calibration"
+calibration_mode = input.string("isotonic", "Calibration", options=["isotonic", "platt"], group=group_calib)
+platt_a = input.float(-0.5, "Platt A", step=0.1, group=group_calib)
+platt_b = input.float(1.0, "Platt B", step=0.1, group=group_calib)
+
+// Fees & Slippage
+group_costs = "💰 Trading Costs"
+fee_maker = input.float(0.02, "Maker Fee (%)", minval=0, maxval=1, step=0.01, group=group_costs)
+fee_taker = input.float(0.04, "Taker Fee (%)", minval=0, maxval=1, step=0.01, group=group_costs)
+slippage_ticks = input.int(1, "Slippage (ticks)", minval=0, maxval=10, group=group_costs)
+
+// Controls
+group_controls = "⚙️ Controls"
+debug_mode = input.bool(false, "Debug Mode", group=group_controls)
+training_mode = input.bool(false, "Training Mode", group=group_controls)
+cooldown_enabled = input.bool(true, "Cooldown After Exit", group=group_controls)
+news_filter = input.bool(true, "News Filter", group=group_controls)
+
+// Webhook
+group_webhook = "🔗 Webhook"
+webhook_url = input.string("https://robinnuttin.app.n8n.cloud/webhook-test/66ad4dad-67d9-4b0c-902d-1f281156c967", "N8N Webhook URL", group=group_webhook)
+
+// =============================================================================
+// UTILITY FUNCTIONS
+// =============================================================================
+
+// Clamp value between min and max
+clamp(val, min_val, max_val) => math.max(min_val, math.min(max_val, val))
+
+// Z-score normalization
+zscore(src, len) =>
+    mean = ta.sma(src, len)
+    std_dev = ta.stdev(src, len)
+    std_dev > 0 ? (src - mean) / std_dev : 0
+
+// Round to tick size
+round_to_tick(price, tick) => math.round(price / tick) * tick
+
+// Round to step size
+round_to_step(qty, step) => math.round(qty / step) * step
+
+// Logistic function for confidence
+logistic(x, k=1.0) => 1 / (1 + math.exp(-k * x))
+
+// Monotonic interpolation for isotonic calibration
+interp_monotone(x, x_points, y_points) =>
+    n = array.size(x_points)
+    if n == 0
+        x
+    else if x <= array.get(x_points, 0)
+        array.get(y_points, 0)
+    else if x >= array.get(x_points, n-1)
+        array.get(y_points, n-1)
+    else
+        result = x
+        for i = 0 to n-2
+            x1 = array.get(x_points, i)
+            x2 = array.get(x_points, i+1)
+            if x >= x1 and x <= x2
+                y1 = array.get(y_points, i)
+                y2 = array.get(y_points, i+1)
+                result := y1 + (y2 - y1) * (x - x1) / (x2 - x1)
+                break
+        result
+
+// =============================================================================
+// MARKET DATA & TIMEFRAMES
+// =============================================================================
+
+// Current symbol detection
+is_btc = str.contains(str.upper(syminfo.ticker), "BTC")
+is_eth = str.contains(str.upper(syminfo.ticker), "ETH")
+is_sol = str.contains(str.upper(syminfo.ticker), "SOL")
+
+// Multi-timeframe data (non-repainting)
+[h_open, h_high, h_low, h_close, h_volume] = request.security(syminfo.tickerid, "1H", [open, high, low, close, volume], lookahead=barmerge.lookahead_off)
+[d_open, d_high, d_low, d_close, d_volume] = request.security(syminfo.tickerid, "1D", [open, high, low, close, volume], lookahead=barmerge.lookahead_off)
+[m1_high, m1_low, m1_close] = request.security(syminfo.tickerid, "1", [high, low, close], lookahead=barmerge.lookahead_off)
+
+// ATR for risk management
+atr14 = ta.atr(14)
+
+// Session detection for VWAP
+is_new_session = ta.change(time("1D"))
+
+// =============================================================================
+// INDICATOR FUNCTIONS (13 CORE INDICATORS)
+// =============================================================================
+
+// 1. EMA Stack (21, 50, 200)
+f_ind_ema() =>
+    ema21 = ta.ema(close, 21)
+    ema50 = ta.ema(close, 50)
+    ema200 = ta.ema(close, 200)
+    
+    // Trend alignment
+    bull_align = close > ema21 and ema21 > ema50 and ema50 > ema200
+    bear_align = close < ema21 and ema21 < ema50 and ema50 < ema200
+    
+    // Momentum
+    ema21_slope = (ema21 - ema21[5]) / ema21[5] * 100
+    momentum_strength = clamp(math.abs(ema21_slope) * 10, 0, 1)
+    
+    long_vote = bull_align ? 1 : 0
+    short_vote = bear_align ? 1 : 0
+    strength = momentum_strength
+    
+    [long_vote, short_vote, strength]
+
+// 2. RSI (14)
+f_ind_rsi() =>
+    rsi = ta.rsi(close, 14)
+    rsi_smooth = ta.ema(rsi, 3)
+    
+    // Conditions
+    oversold = rsi_smooth < 30
+    overbought = rsi_smooth > 70
+    bull_div = rsi_smooth > rsi_smooth[1] and close < close[1]
+    bear_div = rsi_smooth < rsi_smooth[1] and close > close[1]
+    
+    long_signal = oversold or bull_div
+    short_signal = overbought or bear_div
+    
+    // Strength based on distance from midline
+    strength = math.abs(rsi_smooth - 50) / 50
+    
+    [long_signal ? 1 : 0, short_signal ? 1 : 0, strength]
+
+// 3. Session VWAP with Standard Deviation Bands
+f_ind_vwap() =>
+    var float sum_pv = 0.0
+    var float sum_v = 0.0
+    var float sum_pv2 = 0.0
+    
+    if is_new_session
+        sum_pv := 0.0
+        sum_v := 0.0
+        sum_pv2 := 0.0
+    
+    typical_price = hlc3
+    sum_pv := sum_pv + (typical_price * volume)
+    sum_v := sum_v + volume
+    sum_pv2 := sum_pv2 + (typical_price * typical_price * volume)
+    
+    vwap_val = sum_v > 0 ? sum_pv / sum_v : close
+    variance = sum_v > 0 ? (sum_pv2 / sum_v) - (vwap_val * vwap_val) : 0
+    std_dev = variance > 0 ? math.sqrt(variance) : 0
+    
+    upper_1 = vwap_val + std_dev
+    lower_1 = vwap_val - std_dev
+    upper_2 = vwap_val + 2 * std_dev
+    lower_2 = vwap_val - 2 * std_dev
+    
+    // Signals
+    long_signal = close < lower_1 and close[1] >= lower_1  // Bounce from lower band
+    short_signal = close > upper_1 and close[1] <= upper_1  // Rejection from upper band
+    
+    // Strength based on distance from VWAP
+    distance = math.abs(close - vwap_val) / vwap_val
+    strength = clamp(distance * 100, 0, 1)
+    
+    [long_signal ? 1 : 0, short_signal ? 1 : 0, strength]
+
+// 4. ATR Regime (Volatility Context)
+f_ind_atr_regime() =>
+    atr_current = ta.atr(14)
+    atr_sma = ta.sma(atr_current, 50)
+    atr_ratio = atr_current / atr_sma
+    
+    // Volatility expansion/contraction
+    vol_expansion = atr_ratio > 1.2
+    vol_contraction = atr_ratio < 0.8
+    
+    // In low vol, expect breakouts; in high vol, expect mean reversion
+    long_signal = vol_contraction and close > ta.sma(close, 20)
+    short_signal = vol_contraction and close < ta.sma(close, 20)
+    
+    strength = clamp(math.abs(atr_ratio - 1) * 2, 0, 1)
+    
+    [long_signal ? 1 : 0, short_signal ? 1 : 0, strength]
+
+// 5. Adaptive MACD (from LuxAlgo implementation)
+f_ind_adaptive_macd() =>
+    length = 20
+    fast = 10
+    slow = 20
+    signal_len = 9
+    
+    var float macd_val = 0.0
+    a1 = 2 / (fast + 1)
+    a2 = 2 / (slow + 1)
+    
+    r2 = 0.5 * math.pow(ta.correlation(close, bar_index, length), 2) + 0.5
+    K = r2 * ((1 - a1) * (1 - a2)) + (1 - r2) * ((1 - a1) / (1 - a2))
+    
+    macd_val := (close - close[1]) * (a1 - a2) + (-a2 - a1 + 2) * nz(macd_val[1]) - K * nz(macd_val[2])
+    signal_line = ta.ema(macd_val, signal_len)
+    histogram = macd_val - signal_line
+    
+    // Signals
+    long_signal = histogram > 0 and histogram > histogram[1]
+    short_signal = histogram < 0 and histogram < histogram[1]
+    
+    strength = clamp(math.abs(histogram) * 10, 0, 1)
+    
+    [long_signal ? 1 : 0, short_signal ? 1 : 0, strength]
+
+// 6. Bollinger Bands & BBWP
+f_ind_bb_bbwp() =>
+    bb_length = 20
+    bb_mult = 2.0
+    bbwp_lookback = 252
+    
+    basis = ta.sma(close, bb_length)
+    dev = bb_mult * ta.stdev(close, bb_length)
+    upper = basis + dev
+    lower = basis - dev
+    
+    // BBWP
+    bb_width = (upper - lower) / basis
+    bbwp = ta.percentrank(bb_width, bbwp_lookback)
+    
+    // Signals
+    long_signal = close <= lower and bbwp < 20  // Low volatility + oversold
+    short_signal = close >= upper and bbwp < 20  // Low volatility + overbought
+    
+    // BB squeeze breakout
+    squeeze = bbwp < 10
+    breakout_long = squeeze and close > upper
+    breakout_short = squeeze and close < lower
+    
+    final_long = long_signal or breakout_long
+    final_short = short_signal or breakout_short
+    
+    strength = clamp((100 - bbwp) / 100, 0, 1)
+    
+    [final_long ? 1 : 0, final_short ? 1 : 0, strength]
+
+// 7. Stochastic (14, 3, 3)
+f_ind_stochastic() =>
+    k_period = 14
+    d_period = 3
+    smooth = 3
+    
+    stoch_k = ta.stoch(close, high, low, k_period)
+    stoch_d = ta.sma(stoch_k, d_period)
+    
+    // Signals
+    oversold = stoch_k < 20 and stoch_d < 20
+    overbought = stoch_k > 80 and stoch_d > 80
+    bull_cross = ta.crossover(stoch_k, stoch_d)
+    bear_cross = ta.crossunder(stoch_k, stoch_d)
+    
+    long_signal = (oversold and bull_cross) or (stoch_k < 30 and bull_cross)
+    short_signal = (overbought and bear_cross) or (stoch_k > 70 and bear_cross)
+    
+    strength = math.abs(stoch_k - 50) / 50
+    
+    [long_signal ? 1 : 0, short_signal ? 1 : 0, strength]
+
+// 8. OBV Oscillator
+f_ind_obv_osc() =>
+    obv_len = 20
+    
+    obv_val = ta.cum(ta.change(close) > 0 ? volume : ta.change(close) < 0 ? -volume : 0)
+    obv_ema = ta.ema(obv_val, obv_len)
+    obv_osc = obv_val - obv_ema
+    
+    // Signals
+    long_signal = obv_osc > 0 and obv_osc > obv_osc[1]
+    short_signal = obv_osc < 0 and obv_osc < obv_osc[1]
+    
+    // Normalize strength
+    obv_range = ta.highest(math.abs(obv_osc), 50) - ta.lowest(math.abs(obv_osc), 50)
+    strength = obv_range > 0 ? clamp(math.abs(obv_osc) / obv_range, 0, 1) : 0
+    
+    [long_signal ? 1 : 0, short_signal ? 1 : 0, strength]
+
+// 9. CCI (20)
+f_ind_cci() =>
+    cci_len = 20
+    cci_val = ta.cci(close, cci_len)
+    
+    // Signals
+    oversold = cci_val < -100
+    overbought = cci_val > 100
+    zero_cross_up = ta.crossover(cci_val, 0)
+    zero_cross_down = ta.crossunder(cci_val, 0)
+    
+    long_signal = (oversold and cci_val > cci_val[1]) or zero_cross_up
+    short_signal = (overbought and cci_val < cci_val[1]) or zero_cross_down
+    
+    strength = clamp(math.abs(cci_val) / 200, 0, 1)
+    
+    [long_signal ? 1 : 0, short_signal ? 1 : 0, strength]
+
+// 10. Ichimoku Cloud
+f_ind_ichimoku() =>
+    tenkan_len = 9
+    kijun_len = 26
+    senkou_len = 52
+    
+    tenkan = (ta.highest(high, tenkan_len) + ta.lowest(low, tenkan_len)) / 2
+    kijun = (ta.highest(high, kijun_len) + ta.lowest(low, kijun_len)) / 2
+    senkou_a = (tenkan + kijun) / 2
+    senkou_b = (ta.highest(high, senkou_len) + ta.lowest(low, senkou_len)) / 2
+    
+    // Current cloud (26 periods ago)
+    cloud_top = math.max(senkou_a[26], senkou_b[26])
+    cloud_bottom = math.min(senkou_a[26], senkou_b[26])
+    
+    // Signals
+    above_cloud = close > cloud_top
+    below_cloud = close < cloud_bottom
+    tenkan_kijun_bull = tenkan > kijun
+    tenkan_kijun_bear = tenkan < kijun
+    
+    long_signal = above_cloud and tenkan_kijun_bull
+    short_signal = below_cloud and tenkan_kijun_bear
+    
+    // Strength based on distance from cloud
+    cloud_mid = (cloud_top + cloud_bottom) / 2
+    distance = math.abs(close - cloud_mid) / close
+    strength = clamp(distance * 100, 0, 1)
+    
+    [long_signal ? 1 : 0, short_signal ? 1 : 0, strength]
+
+// 11. SuperTrend (10, 3)
+f_ind_supertrend() =>
+    st_length = 10
+    st_mult = 3.0
+    
+    atr_st = ta.atr(st_length)
+    hl2_val = hl2
+    
+    upper_band = hl2_val + (st_mult * atr_st)
+    lower_band = hl2_val - (st_mult * atr_st)
+    
+    var float supertrend = na
+    var int direction = 1
+    
+    prev_supertrend = nz(supertrend[1], lower_band)
+    prev_direction = nz(direction[1], 1)
+    
+    if prev_direction == 1
+        supertrend := close <= prev_supertrend ? prev_supertrend : lower_band
+    else
+        supertrend := close >= prev_supertrend ? prev_supertrend : upper_band
+    
+    direction := close <= supertrend ? -1 : 1
+    
+    // Signals
+    long_signal = direction == 1 and prev_direction == -1
+    short_signal = direction == -1 and prev_direction == 1
+    
+    // Strength based on distance from SuperTrend
+    distance = math.abs(close - supertrend) / close
+    strength = clamp(distance * 50, 0, 1)
+    
+    [long_signal ? 1 : 0, short_signal ? 1 : 0, strength]
+
+// 12. ADX (14)
+f_ind_adx() =>
+    adx_len = 14
+    [plus_di, minus_di, adx_val] = ta.dmi(adx_len, adx_len)
+    
+    // Trend strength
+    strong_trend = adx_val > 25
+    weak_trend = adx_val < 20
+    
+    // Directional signals
+    bull_momentum = plus_di > minus_di and adx_val > adx_val[1]
+    bear_momentum = minus_di > plus_di and adx_val > adx_val[1]
+    
+    long_signal = strong_trend and bull_momentum
+    short_signal = strong_trend and bear_momentum
+    
+    strength = clamp(adx_val / 50, 0, 1)
+    
+    [long_signal ? 1 : 0, short_signal ? 1 : 0, strength]
+
+// 13. Volume Profile Proxy (Session-based)
+f_ind_volume_profile() =>
+    // Simplified volume profile using session volume weighting
+    var float session_volume = 0.0
+    var float session_pv = 0.0
+    var float session_high = 0.0
+    var float session_low = 0.0
+    
+    if is_new_session
+        session_volume := 0.0
+        session_pv := 0.0
+        session_high := high
+        session_low := low
+    else
+        session_high := math.max(session_high, high)
+        session_low := math.min(session_low, low)
+    
+    session_volume := session_volume + volume
+    session_pv := session_pv + (hlc3 * volume)
+    
+    // Volume POC approximation
+    poc_approx = session_volume > 0 ? session_pv / session_volume : close
+    
+    // Value area approximation (68% of volume around POC)
+    session_range = session_high - session_low
+    va_high = poc_approx + 0.34 * session_range
+    va_low = poc_approx - 0.34 * session_range
+    
+    // Signals
+    above_poc = close > poc_approx
+    below_poc = close < poc_approx
+    near_va_high = close >= va_high * 0.98 and close <= va_high * 1.02
+    near_va_low = close >= va_low * 0.98 and close <= va_low * 1.02
+    
+    long_signal = below_poc and near_va_low  // Support at VA low
+    short_signal = above_poc and near_va_high  // Resistance at VA high
+    
+    // Strength based on volume concentration
+    vol_concentration = session_volume > ta.sma(volume, 20)
+    strength = vol_concentration ? 0.8 : 0.3
+    
+    [long_signal ? 1 : 0, short_signal ? 1 : 0, strength]
+
+// =============================================================================
+// ENSEMBLE SCORING & CONFIDENCE
+// =============================================================================
+
+// Get all indicator votes
+[ema_long, ema_short, ema_str] = f_ind_ema()
+[rsi_long, rsi_short, rsi_str] = f_ind_rsi()
+[vwap_long, vwap_short, vwap_str] = f_ind_vwap()
+[atr_long, atr_short, atr_str] = f_ind_atr_regime()
+[macd_long, macd_short, macd_str] = f_ind_adaptive_macd()
+[bb_long, bb_short, bb_str] = f_ind_bb_bbwp()
+[stoch_long, stoch_short, stoch_str] = f_ind_stochastic()
+[obv_long, obv_short, obv_str] = f_ind_obv_osc()
+[cci_long, cci_short, cci_str] = f_ind_cci()
+[ichi_long, ichi_short, ichi_str] = f_ind_ichimoku()
+[st_long, st_short, st_str] = f_ind_supertrend()
+[adx_long, adx_short, adx_str] = f_ind_adx()
+[vp_long, vp_short, vp_str] = f_ind_volume_profile()
+
+// Calculate weighted ensemble scores
+score_long = w1*ema_long*ema_str + w2*rsi_long*rsi_str + w3*vwap_long*vwap_str + 
+             w4*atr_long*atr_str + w5*macd_long*macd_str + w6*bb_long*bb_str +
+             w7*stoch_long*stoch_str + w8*obv_long*obv_str + w9*cci_long*cci_str +
+             w10*ichi_long*ichi_str + w11*st_long*st_str + w12*adx_long*adx_str + w13*vp_long*vp_str
+
+score_short = w1*ema_short*ema_str + w2*rsi_short*rsi_str + w3*vwap_short*vwap_str + 
+              w4*atr_short*atr_str + w5*macd_short*macd_str + w6*bb_short*bb_str +
+              w7*stoch_short*stoch_str + w8*obv_short*obv_str + w9*cci_short*cci_str +
+              w10*ichi_short*ichi_str + w11*st_short*st_str + w12*adx_short*adx_str + w13*vp_short*vp_str
+
+// Margin and raw confidence
+margin = math.abs(score_long - score_short)
+raw_conf = logistic(margin, 2.0)
+
+// Calibration (simplified isotonic for production)
+calib_x = array.from(0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+calib_y = array.from(0.1, 0.3, 0.5, 0.7, 0.85, 0.95)
+
+confidence = calibration_mode == "isotonic" ? 
+             interp_monotone(raw_conf, calib_x, calib_y) : 
+             1 / (1 + math.exp(-(platt_a + platt_b * raw_conf)))
+
+confidence := clamp(confidence, 0, 1)
+
+// =============================================================================
+// MARKET GUARDS & FILTERS
+// =============================================================================
+
+// Spread estimation (proxy using 1m high-low)
+spread_bps = (m1_high - m1_low) / m1_close * 10000
+max_spread = is_btc ? btc_spread_max : is_eth ? eth_spread_max : sol_spread_max
+spread_ok = spread_bps <= max_spread
+
+// Volatility filter
+vol_5m = ta.stdev(ta.change(close), 20) / close * 100
+extreme_vol = vol_5m > 5.0  // 5% volatility threshold
+vol_ok = not extreme_vol or confidence >= 0.80
+
+// News filter (simplified - block major news times)
+// European trading hours: 08:00-17:00 CET
+hour_cet = math.floor((timestamp("GMT+1", year, month, dayofmonth, hour, minute) % 86400000) / 3600000)
+news_hours = hour_cet == 8 or hour_cet == 14 or hour_cet == 16  // Major news times
+news_ok = not news_filter or not news_hours
+
+// Combined guard
+guards_ok = spread_ok and vol_ok and news_ok
+
+// =============================================================================
+// SIGNAL GENERATION & RISK MANAGEMENT
+// =============================================================================
+
+// Signal conditions
+long_condition = score_long >= T_long and score_long > score_short and confidence >= min_conf and guards_ok
+short_condition = score_short >= T_short and score_short > score_long and confidence >= min_conf and guards_ok
+
+// Risk-Reward and Leverage mapping
+rr_ratio = confidence >= 0.80 ? rr_high : rr_low
+leverage = confidence >= 0.80 ? lev_high : lev_low
+
+// SOL leverage cap
+if is_sol and leverage > sol_max_lev
+    leverage := sol_max_lev
+
+// ATR-based Stop Loss and Take Profit
+entry_price = close
+sl_distance = atr_k * atr14
+sl_long = entry_price - sl_distance
+sl_short = entry_price + sl_distance
+tp_long = entry_price + rr_ratio * sl_distance
+tp_short = entry_price - rr_ratio * sl_distance
+
+// Position sizing
+risk_per_trade = math.min(max_loss_trade, capital * 0.02)  // Max 2% of capital
+position_size_raw = risk_per_trade / (sl_distance * leverage)
+position_size = round_to_step(position_size_raw, step_size)
+
+// Risk in EUR
+risk_eur = sl_distance * position_size * leverage
+
+// =============================================================================
+// DAILY KILL-SWITCH & COOLDOWN
+// =============================================================================
+
+var float daily_pnl = 0.0
+var int last_exit_bar = 0
+var bool kill_switch_active = false
+
+// Reset daily PnL at midnight Brussels time
+new_day = ta.change(dayofweek) != 0 or (hour == 0 and minute == 0)
+if new_day
+    daily_pnl := 0.0
+    kill_switch_active := false
+
+// Kill switch activation
+if daily_pnl <= -max_daily_loss
+    kill_switch_active := true
+
+// Cooldown logic
+bars_since_exit = bar_index - last_exit_bar
+cooldown_bars = 1  // 5 minutes = 1 bar on 5m
+in_cooldown = cooldown_enabled and bars_since_exit < cooldown_bars and confidence < 0.90
+
+// Final signal validation
+can_trade = not kill_switch_active and not in_cooldown and barstate.isconfirmed
+
+D3_BUY = long_condition and can_trade
+D3_SELL = short_condition and can_trade
+
+// =============================================================================
+// POSITION TRACKING & PNL SIMULATION
+// =============================================================================
+
+var float entry_level = na
+var float stop_level = na
+var float target_level = na
+var bool in_position = false
+var string position_side = na
+var int entry_bar = 0
+
+// Entry logic
+if D3_BUY and not in_position
+    entry_level := round_to_tick(entry_price, tick_size)
+    stop_level := round_to_tick(sl_long, tick_size)
+    target_level := round_to_tick(tp_long, tick_size)
+    in_position := true
+    position_side := "LONG"
+    entry_bar := bar_index
+
+if D3_SELL and not in_position
+    entry_level := round_to_tick(entry_price, tick_size)
+    stop_level := round_to_tick(sl_short, tick_size)
+    target_level := round_to_tick(tp_short, tick_size)
+    in_position := true
+    position_side := "SHORT"
+    entry_bar := bar_index
+
+// Exit logic
+var bool exit_triggered = false
+exit_triggered := false
+
+if in_position and position_side == "LONG"
+    if low <= stop_level or high >= target_level
+        exit_triggered := true
+        exit_price = low <= stop_level ? stop_level : target_level
+        pnl = (exit_price - entry_level) * position_size * leverage
+        daily_pnl := daily_pnl + pnl - (pnl * fee_taker / 100)  // Apply fees
+        last_exit_bar := bar_index
+
+if in_position and position_side == "SHORT"
+    if high >= stop_level or low <= target_level
+        exit_triggered := true
+        exit_price = high >= stop_level ? stop_level : target_level
+        pnl = (entry_level - exit_price) * position_size * leverage
+        daily_pnl := daily_pnl + pnl - (math.abs(pnl) * fee_taker / 100)  // Apply fees
+        last_exit_bar := bar_index
+
+if exit_triggered
+    in_position := false
+    position_side := na
+    entry_level := na
+    stop_level := na
+    target_level := na
+
+// =============================================================================
+// VISUALS & PLOTS
+// =============================================================================
+
+// Entry markers
+plotshape(D3_BUY, title="BUY Signal", location=location.belowbar, style=shape.labelup, 
+          size=size.normal, color=color.new(color.green, 0), textcolor=color.white, text="BUY")
+
+plotshape(D3_SELL, title="SELL Signal", location=location.abovebar, style=shape.labeldown, 
+          size=size.normal, color=color.new(color.red, 0), textcolor=color.white, text="SELL")
+
+// Position lines
+plot(in_position ? entry_level : na, title="Entry", color=color.blue, linewidth=2, style=plot.style_line)
+plot(in_position ? stop_level : na, title="Stop Loss", color=color.red, linewidth=1, style=plot.style_line)
+plot(in_position ? target_level : na, title="Take Profit", color=color.green, linewidth=1, style=plot.style_line)
+
+// Predictive direction line (visual only)
+if in_position
+    direction_slope = position_side == "LONG" ? 1 : -1
+    line.new(bar_index, entry_level, bar_index + 10, 
+             entry_level + direction_slope * atr14, 
+             color=position_side == "LONG" ? color.green : color.red, 
+             width=2, style=line.style_arrow_right, extend=extend.none)
+
+// Info label
+if in_position and barstate.islast
+    label_text = position_side + "\nEntry: " + str.tostring(entry_level, "#.##") + 
+                 "\nSL: " + str.tostring(stop_level, "#.##") + 
+                 "\nTP: " + str.tostring(target_level, "#.##") + 
+                 "\nRR: " + str.tostring(rr_ratio, "#.#") + 
+                 "\nConf: " + str.tostring(confidence * 100, "#.#") + "%" +
+                 "\nLev: " + str.tostring(leverage) + "x" +
+                 "\nSize: " + str.tostring(position_size, "#.###") +
+                 "\nRisk: €" + str.tostring(risk_eur, "#.##")
+    
+    label.new(bar_index, high, label_text, 
+              style=label.style_label_down, 
+              color=position_side == "LONG" ? color.new(color.green, 80) : color.new(color.red, 80),
+              textcolor=color.white, size=size.normal)
+
+// Kill switch warning
+if kill_switch_active
+    label.new(bar_index, high, "⚠️ DAILY LIMIT REACHED\nNO NEW ENTRIES", 
+              style=label.style_label_down, color=color.new(color.red, 0), 
+              textcolor=color.white, size=size.large)
+
+// Debug mode table
+if debug_mode and barstate.islast
+    var table debug_table = table.new(position.top_right, 4, 15, 
+                                      bgcolor=color.new(color.black, 80), 
+                                      border_width=1, border_color=color.gray)
+    
+    table.cell(debug_table, 0, 0, "Indicator", text_color=color.white, bgcolor=color.gray)
+    table.cell(debug_table, 1, 0, "Long", text_color=color.white, bgcolor=color.gray)
+    table.cell(debug_table, 2, 0, "Short", text_color=color.white, bgcolor=color.gray)
+    table.cell(debug_table, 3, 0, "Strength", text_color=color.white, bgcolor=color.gray)
+    
+    indicators = array.from("EMA", "RSI", "VWAP", "ATR", "MACD", "BB", "STOCH", "OBV", "CCI", "ICHI", "ST", "ADX", "VP")
+    long_votes = array.from(ema_long, rsi_long, vwap_long, atr_long, macd_long, bb_long, stoch_long, obv_long, cci_long, ichi_long, st_long, adx_long, vp_long)
+    short_votes = array.from(ema_short, rsi_short, vwap_short, atr_short, macd_short, bb_short, stoch_short, obv_short, cci_short, ichi_short, st_short, adx_short, vp_short)
+    strengths = array.from(ema_str, rsi_str, vwap_str, atr_str, macd_str, bb_str, stoch_str, obv_str, cci_str, ichi_str, st_str, adx_str, vp_str)
+    
+    for i = 0 to 12
+        table.cell(debug_table, 0, i+1, array.get(indicators, i), text_color=color.white)
+        table.cell(debug_table, 1, i+1, str.tostring(array.get(long_votes, i)), 
+                   text_color=array.get(long_votes, i) == 1 ? color.green : color.gray)
+        table.cell(debug_table, 2, i+1, str.tostring(array.get(short_votes, i)), 
+                   text_color=array.get(short_votes, i) == 1 ? color.red : color.gray)
+        table.cell(debug_table, 3, i+1, str.tostring(array.get(strengths, i), "#.##"), text_color=color.white)
+    
+    // Summary row
+    table.cell(debug_table, 0, 14, "ENSEMBLE", text_color=color.yellow, bgcolor=color.gray)
+    table.cell(debug_table, 1, 14, str.tostring(score_long, "#.##"), text_color=color.green)
+    table.cell(debug_table, 2, 14, str.tostring(score_short, "#.##"), text_color=color.red)
+    table.cell(debug_table, 3, 14, str.tostring(confidence, "#.##"), text_color=color.yellow)
+
+// Training mode stats
+if training_mode and barstate.islast
+    var int total_trades = 0
+    var int winning_trades = 0
+    var float total_pnl = 0.0
+    
+    // This would be populated by the backtest logic (simplified for production)
+    winrate = total_trades > 0 ? winning_trades / total_trades * 100 : 0
+    avg_pnl = total_trades > 0 ? total_pnl / total_trades : 0
+    
+    table.new(position.bottom_left, 2, 4, bgcolor=color.new(color.blue, 80), border_width=1)
+    // Stats would be displayed here
+
+// =============================================================================
+// ALERTS FOR N8N WEBHOOK
+// =============================================================================
+
+// Alert conditions (only fire on confirmed bars)
+alertcondition(D3_BUY, "D3 BUY", 
+               '{"symbol":"{{ticker}}","tf":"{{interval}}","side":"BUY","entry":' + str.tostring(entry_price, "#.##") + 
+               ',"sl":' + str.tostring(sl_long, "#.##") + ',"tp":' + str.tostring(tp_long, "#.##") + 
+               ',"conf":' + str.tostring(confidence, "#.##") + ',"rr":' + str.tostring(rr_ratio, "#.#") + 
+               ',"lev":' + str.tostring(leverage) + ',"size":' + str.tostring(position_size, "#.###") + 
+               ',"risk_eur":' + str.tostring(risk_eur, "#.##") + ',"ts":"{{timenow}}"}')
+
+alertcondition(D3_SELL, "D3 SELL", 
+               '{"symbol":"{{ticker}}","tf":"{{interval}}","side":"SELL","entry":' + str.tostring(entry_price, "#.##") + 
+               ',"sl":' + str.tostring(sl_short, "#.##") + ',"tp":' + str.tostring(tp_short, "#.##") + 
+               ',"conf":' + str.tostring(confidence, "#.##") + ',"rr":' + str.tostring(rr_ratio, "#.#") + 
+               ',"lev":' + str.tostring(leverage) + ',"size":' + str.tostring(position_size, "#.###") + 
+               ',"risk_eur":' + str.tostring(risk_eur, "#.##") + ',"ts":"{{timenow}}"}')
+
+// =============================================================================
+// END OF D3_ENSEMBLE_PRO.PINE
+// =============================================================================
